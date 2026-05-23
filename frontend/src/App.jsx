@@ -1,31 +1,8 @@
 import React from "react";
-import {
-  createAppointment,
-  fetchAppointments,
-  fetchAvailableSlots,
-} from "./api/appointments";
-import { clearAuthToken, fetchMe, hasAuthToken, login, setAuthToken } from "./api/auth";
-import {
-  createDoctor,
-  createDoctorSchedule,
-  fetchDoctorById,
-  fetchDoctors,
-} from "./api/doctors";
-import {
-  createPatient,
-  fetchPatientById,
-  fetchPatients,
-  updatePatient,
-} from "./api/patients";
-import { fetchReportsSummary } from "./api/reports";
-import { createUser, fetchUserMeta, fetchUsers } from "./api/users";
-import {
-  completeVisit,
-  fetchDoctorAppointments,
-  fetchVisitDetails,
-} from "./api/visits";
 import DoctorForm, { emptyDoctorForm } from "./components/DoctorForm";
 import PatientForm, { emptyPatientForm } from "./components/PatientForm";
+import useClinicApp from "./hooks/useClinicApp";
+import { ROLE_LABELS, getRoleName, navigate } from "./hooks/useHashRoute";
 import AppointmentsPage from "./pages/AppointmentsPage";
 import DoctorDetailsPage from "./pages/DoctorDetailsPage";
 import DoctorsListPage from "./pages/DoctorsListPage";
@@ -37,883 +14,11 @@ import UsersPage from "./pages/UsersPage";
 import VisitsPage from "./pages/VisitsPage";
 import "./styles/app.css";
 
-const ROLE_LABELS = {
-  admin: "Администратор",
-  registrar: "Регистратор",
-  doctor: "Врач",
-};
-
-const NAV_ITEMS = {
-  admin: [
-    { module: "patients", label: "Пациенты", path: "/patients" },
-    { module: "appointments", label: "Запись на прием", path: "/appointments" },
-    { module: "visits", label: "Проведение приема", path: "/visits" },
-    { module: "doctors", label: "Врачи и расписание", path: "/doctors" },
-    { module: "reports", label: "Отчеты", path: "/reports" },
-    { module: "users", label: "Пользователи", path: "/users" },
-  ],
-  registrar: [
-    { module: "patients", label: "Пациенты", path: "/patients" },
-    { module: "appointments", label: "Запись на прием", path: "/appointments" },
-    { module: "doctors", label: "Врачи и расписание", path: "/doctors" },
-  ],
-  doctor: [{ module: "visits", label: "Проведение приема", path: "/visits" }],
-};
-
-function buildPatientPayload(form) {
-  return {
-    ...form,
-    birth_date: form.birth_date || null,
-    middle_name: form.middle_name || null,
-    gender: form.gender || null,
-    phone: form.phone || null,
-    address: form.address || null,
-    policy_number: form.policy_number || null,
-    snils: form.snils || null,
-  };
-}
-
-function buildPatientForm(patient) {
-  if (!patient) {
-    return emptyPatientForm;
-  }
-
-  return {
-    first_name: patient.first_name || "",
-    last_name: patient.last_name || "",
-    middle_name: patient.middle_name || "",
-    birth_date: patient.birth_date || "",
-    gender: patient.gender || "",
-    phone: patient.phone || "",
-    address: patient.address || "",
-    policy_number: patient.policy_number || "",
-    snils: patient.snils || "",
-  };
-}
-
-function parseRoute() {
-  const hash = window.location.hash.replace(/^#/, "") || "/login";
-  const doctorDetailMatch = hash.match(/^\/doctors\/(\d+)$/);
-  const patientEditMatch = hash.match(/^\/patients\/(\d+)\/edit$/);
-  const patientDetailMatch = hash.match(/^\/patients\/(\d+)$/);
-
-  if (hash === "/login") {
-    return { module: "auth", name: "login" };
-  }
-  if (hash === "/appointments") {
-    return { module: "appointments", name: "list" };
-  }
-  if (hash === "/users") {
-    return { module: "users", name: "list" };
-  }
-  if (hash === "/reports") {
-    return { module: "reports", name: "list" };
-  }
-  if (hash === "/visits") {
-    return { module: "visits", name: "list" };
-  }
-  if (hash === "/doctors") {
-    return { module: "doctors", name: "list" };
-  }
-  if (hash === "/doctors/new") {
-    return { module: "doctors", name: "create" };
-  }
-  if (doctorDetailMatch) {
-    return { module: "doctors", name: "details", doctorId: Number(doctorDetailMatch[1]) };
-  }
-  if (hash === "/patients/new") {
-    return { module: "patients", name: "create" };
-  }
-  if (patientEditMatch) {
-    return { module: "patients", name: "edit", patientId: Number(patientEditMatch[1]) };
-  }
-  if (patientDetailMatch) {
-    return { module: "patients", name: "details", patientId: Number(patientDetailMatch[1]) };
-  }
-
-  return { module: "patients", name: "list" };
-}
-
-function navigate(path) {
-  window.location.hash = path;
-}
-
-function getRoleName(user) {
-  return user?.role_name || "";
-}
-
-function getDefaultPathForUser(user) {
-  if (getRoleName(user) === "doctor") {
-    return "/visits";
-  }
-  return "/patients";
-}
-
-function canAccessRoute(user, route) {
-  const roleName = getRoleName(user);
-
-  if (!user) {
-    return route.name === "login";
-  }
-  if (route.name === "login") {
-    return false;
-  }
-  if (roleName === "admin") {
-    return true;
-  }
-  if (roleName === "registrar") {
-    if (route.module === "patients") {
-      return true;
-    }
-    if (route.module === "appointments") {
-      return route.name === "list";
-    }
-    if (route.module === "doctors") {
-      return route.name === "list" || route.name === "details";
-    }
-    return false;
-  }
-  if (roleName === "doctor") {
-    return route.module === "visits";
-  }
-
-  return false;
-}
-
-function getNavigationItems(user) {
-  return NAV_ITEMS[getRoleName(user)] || [];
-}
-
-function resetClinicState(setters) {
-  setters.setPatients([]);
-  setters.setDoctors([]);
-  setters.setAppointments([]);
-  setters.setReportsSummary(null);
-  setters.setUsers([]);
-  setters.setUserRoles([]);
-  setters.setAvailableUserDoctors([]);
-  setters.setDoctorAppointments([]);
-  setters.setSelectedPatient(null);
-  setters.setSelectedDoctor(null);
-  setters.setSelectedVisitDetails(null);
-  setters.setSelectedVisitAppointmentId("");
-  setters.setSelectedVisitDoctorId("");
-  setters.setSelectedAppointmentPatientId("");
-  setters.setSelectedAppointmentDoctorId("");
-  setters.setSelectedAppointmentDate("");
-  setters.setSelectedAppointmentTime("");
-  setters.setAppointmentReason("");
-  setters.setAvailableAppointmentDates([]);
-  setters.setAvailableAppointmentSlots([]);
-  setters.setSearch("");
-  setters.setDoctorSearch("");
-}
-
 function App() {
-  const [route, setRoute] = React.useState(parseRoute);
-  const [authUser, setAuthUser] = React.useState(null);
-  const [isAuthLoading, setIsAuthLoading] = React.useState(true);
-  const [patients, setPatients] = React.useState([]);
-  const [doctors, setDoctors] = React.useState([]);
-  const [appointments, setAppointments] = React.useState([]);
-  const [reportsSummary, setReportsSummary] = React.useState(null);
-  const [users, setUsers] = React.useState([]);
-  const [userRoles, setUserRoles] = React.useState([]);
-  const [availableUserDoctors, setAvailableUserDoctors] = React.useState([]);
-  const [search, setSearch] = React.useState("");
-  const [doctorSearch, setDoctorSearch] = React.useState("");
-  const [selectedAppointmentPatientId, setSelectedAppointmentPatientId] = React.useState("");
-  const [selectedAppointmentDoctorId, setSelectedAppointmentDoctorId] = React.useState("");
-  const [selectedAppointmentDate, setSelectedAppointmentDate] = React.useState("");
-  const [selectedAppointmentTime, setSelectedAppointmentTime] = React.useState("");
-  const [appointmentReason, setAppointmentReason] = React.useState("");
-  const [availableAppointmentDates, setAvailableAppointmentDates] = React.useState([]);
-  const [availableAppointmentSlots, setAvailableAppointmentSlots] = React.useState([]);
-  const [doctorAppointments, setDoctorAppointments] = React.useState([]);
-  const [selectedVisitDoctorId, setSelectedVisitDoctorId] = React.useState("");
-  const [selectedVisitAppointmentId, setSelectedVisitAppointmentId] = React.useState("");
-  const [selectedVisitDetails, setSelectedVisitDetails] = React.useState(null);
-  const [selectedPatient, setSelectedPatient] = React.useState(null);
-  const [selectedDoctor, setSelectedDoctor] = React.useState(null);
-  const [isListLoading, setIsListLoading] = React.useState(false);
-  const [isDetailsLoading, setIsDetailsLoading] = React.useState(false);
-  const [isSaving, setIsSaving] = React.useState(false);
-  const [authError, setAuthError] = React.useState("");
-  const [listError, setListError] = React.useState("");
-  const [doctorListError, setDoctorListError] = React.useState("");
-  const [formError, setFormError] = React.useState("");
-  const [detailsError, setDetailsError] = React.useState("");
-  const [scheduleError, setScheduleError] = React.useState("");
-  const [appointmentError, setAppointmentError] = React.useState("");
-  const [visitError, setVisitError] = React.useState("");
-  const [success, setSuccess] = React.useState("");
-
-  const setters = {
-    setPatients,
-    setDoctors,
-    setAppointments,
-    setReportsSummary,
-    setUsers,
-    setUserRoles,
-    setAvailableUserDoctors,
-    setDoctorAppointments,
-    setSelectedPatient,
-    setSelectedDoctor,
-    setSelectedVisitDetails,
-    setSelectedVisitAppointmentId,
-    setSelectedVisitDoctorId,
-    setSelectedAppointmentPatientId,
-    setSelectedAppointmentDoctorId,
-    setSelectedAppointmentDate,
-    setSelectedAppointmentTime,
-    setAppointmentReason,
-    setAvailableAppointmentDates,
-    setAvailableAppointmentSlots,
-    setSearch,
-    setDoctorSearch,
-  };
-
-  const loadPatients = React.useCallback(async (query = "") => {
-    setIsListLoading(true);
-    setListError("");
-
-    try {
-      const data = await fetchPatients(query);
-      setPatients(data.items);
-    } catch (loadError) {
-      setListError(
-        loadError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при загрузке пациентов."
-          : "Не удалось загрузить пациентов. Проверь, что backend запущен."
-      );
-    } finally {
-      setIsListLoading(false);
-    }
-  }, []);
-
-  const loadAppointments = React.useCallback(async () => {
-    setIsListLoading(true);
-    setAppointmentError("");
-
-    try {
-      const [appointmentsData, patientsData, doctorsData] = await Promise.all([
-        fetchAppointments(),
-        fetchPatients(),
-        fetchDoctors(),
-      ]);
-      setAppointments(appointmentsData.items);
-      setPatients(patientsData.items);
-      setDoctors(doctorsData.items);
-    } catch (loadError) {
-      setAppointmentError(
-        loadError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при загрузке записей на прием."
-          : loadError?.message || "Не удалось загрузить данные для записи на прием."
-      );
-    } finally {
-      setIsListLoading(false);
-    }
-  }, []);
-
-  const loadDoctors = React.useCallback(async (query = "") => {
-    setIsListLoading(true);
-    setDoctorListError("");
-
-    try {
-      const data = await fetchDoctors(query);
-      setDoctors(data.items);
-    } catch (loadError) {
-      setDoctorListError(
-        loadError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при загрузке врачей."
-          : loadError?.message || "Не удалось загрузить врачей."
-      );
-    } finally {
-      setIsListLoading(false);
-    }
-  }, []);
-
-  const loadReportsModule = React.useCallback(async () => {
-    setIsListLoading(true);
-    setListError("");
-
-    try {
-      const summary = await fetchReportsSummary();
-      setReportsSummary(summary);
-    } catch (loadError) {
-      setListError(
-        loadError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при загрузке отчетов."
-          : loadError?.message || "Не удалось загрузить отчеты."
-      );
-    } finally {
-      setIsListLoading(false);
-    }
-  }, []);
-
-  const loadUsersModule = React.useCallback(async () => {
-    setIsListLoading(true);
-    setFormError("");
-
-    try {
-      const [usersData, metaData] = await Promise.all([fetchUsers(), fetchUserMeta()]);
-      setUsers(usersData.items);
-      setUserRoles(metaData.roles);
-      setAvailableUserDoctors(metaData.available_doctors);
-    } catch (loadError) {
-      setFormError(
-        loadError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при загрузке пользователей."
-          : loadError?.message || "Не удалось загрузить пользователей."
-      );
-    } finally {
-      setIsListLoading(false);
-    }
-  }, []);
-
-  const loadVisitsModule = React.useCallback(async () => {
-    setIsListLoading(true);
-    setVisitError("");
-
-    try {
-      if (getRoleName(authUser) === "doctor") {
-        if (!authUser.employee_id) {
-          throw new Error("Для учетной записи врача не назначена карточка сотрудника.");
-        }
-
-        const [doctor, appointmentsData] = await Promise.all([
-          fetchDoctorById(authUser.employee_id),
-          fetchDoctorAppointments(authUser.employee_id),
-        ]);
-
-        setDoctors([doctor]);
-        setSelectedVisitDoctorId(String(authUser.employee_id));
-        setDoctorAppointments(appointmentsData.items);
-        return;
-      }
-
-      const doctorsData = await fetchDoctors();
-      setDoctors(doctorsData.items);
-    } catch (loadError) {
-      setVisitError(
-        loadError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при загрузке данных врача."
-          : loadError?.message || "Не удалось загрузить данные для проведения приема."
-      );
-    } finally {
-      setIsListLoading(false);
-    }
-  }, [authUser]);
-
-  const loadPatientDetails = React.useCallback(async (patientId) => {
-    setIsDetailsLoading(true);
-    setDetailsError("");
-
-    try {
-      const patient = await fetchPatientById(patientId);
-      setSelectedPatient(patient);
-      return patient;
-    } catch (loadError) {
-      setDetailsError(loadError?.message || "Не удалось загрузить карточку пациента.");
-      setSelectedPatient(null);
-      return null;
-    } finally {
-      setIsDetailsLoading(false);
-    }
-  }, []);
-
-  const loadDoctorDetails = React.useCallback(async (doctorId) => {
-    setIsDetailsLoading(true);
-    setDetailsError("");
-
-    try {
-      const doctor = await fetchDoctorById(doctorId);
-      setSelectedDoctor(doctor);
-      return doctor;
-    } catch (loadError) {
-      setDetailsError(loadError?.message || "Не удалось загрузить карточку врача.");
-      setSelectedDoctor(null);
-      return null;
-    } finally {
-      setIsDetailsLoading(false);
-    }
-  }, []);
-
-  React.useEffect(() => {
-    if (!window.location.hash) {
-      navigate("/login");
-    }
-
-    function handleHashChange() {
-      setRoute(parseRoute());
-      setFormError("");
-      setDetailsError("");
-      setScheduleError("");
-      setAppointmentError("");
-      setVisitError("");
-      setSuccess("");
-    }
-
-    function handleUnauthorized() {
-      clearAuthToken();
-      setAuthUser(null);
-      setAuthError("Сессия истекла. Войди снова.");
-      resetClinicState(setters);
-      navigate("/login");
-    }
-
-    window.addEventListener("hashchange", handleHashChange);
-    window.addEventListener("auth:unauthorized", handleUnauthorized);
-
-    return () => {
-      window.removeEventListener("hashchange", handleHashChange);
-      window.removeEventListener("auth:unauthorized", handleUnauthorized);
-    };
-  }, []);
-
-  React.useEffect(() => {
-    async function bootstrapAuth() {
-      if (!hasAuthToken()) {
-        setIsAuthLoading(false);
-        return;
-      }
-
-      try {
-        const user = await fetchMe();
-        setAuthUser(user);
-      } catch {
-        clearAuthToken();
-        setAuthUser(null);
-        setAuthError("Сохраненная сессия недействительна. Войди снова.");
-      } finally {
-        setIsAuthLoading(false);
-      }
-    }
-
-    void bootstrapAuth();
-  }, []);
-
-  React.useEffect(() => {
-    if (isAuthLoading) {
-      return;
-    }
-
-    if (!authUser) {
-      if (route.name !== "login") {
-        navigate("/login");
-      }
-      return;
-    }
-
-    if (route.name === "login") {
-      navigate(getDefaultPathForUser(authUser));
-      return;
-    }
-
-    if (!canAccessRoute(authUser, route)) {
-      navigate(getDefaultPathForUser(authUser));
-    }
-  }, [authUser, isAuthLoading, route]);
-
-  React.useEffect(() => {
-    if (isAuthLoading || !authUser || route.name === "login" || !canAccessRoute(authUser, route)) {
-      return;
-    }
-
-    if (route.module === "patients" && route.name === "list") {
-      void loadPatients(search);
-      return;
-    }
-    if (route.module === "patients" && (route.name === "details" || route.name === "edit")) {
-      void loadPatientDetails(route.patientId);
-      return;
-    }
-    if (route.module === "doctors" && route.name === "list") {
-      void loadDoctors(doctorSearch);
-      return;
-    }
-    if (route.module === "doctors" && route.name === "details") {
-      void loadDoctorDetails(route.doctorId);
-      return;
-    }
-    if (route.module === "appointments") {
-      void loadAppointments();
-      return;
-    }
-    if (route.module === "reports") {
-      void loadReportsModule();
-      return;
-    }
-    if (route.module === "users") {
-      void loadUsersModule();
-      return;
-    }
-    if (route.module === "visits") {
-      void loadVisitsModule();
-    }
-  }, [
-    authUser,
-    doctorSearch,
-    isAuthLoading,
-    loadAppointments,
-    loadDoctorDetails,
-    loadDoctors,
-    loadPatientDetails,
-    loadPatients,
-    loadReportsModule,
-    loadUsersModule,
-    loadVisitsModule,
-    route,
-    search,
-  ]);
-
-  React.useEffect(() => {
-    async function loadDoctorScheduleDates() {
-      if (!selectedAppointmentDoctorId || !authUser) {
-        setAvailableAppointmentDates([]);
-        return;
-      }
-
-      try {
-        const doctor = await fetchDoctorById(selectedAppointmentDoctorId);
-        setAvailableAppointmentDates(
-          Array.from(new Set(doctor.schedules.map((schedule) => schedule.work_date)))
-        );
-      } catch (loadError) {
-        setAppointmentError(
-          loadError?.name === "AbortError"
-            ? "Сервер слишком долго отвечает при загрузке дат приема."
-            : loadError?.message || "Не удалось загрузить даты приема врача."
-        );
-        setAvailableAppointmentDates([]);
-      }
-    }
-
-    void loadDoctorScheduleDates();
-  }, [authUser, selectedAppointmentDoctorId]);
-
-  React.useEffect(() => {
-    async function loadSlots() {
-      if (!selectedAppointmentDoctorId || !selectedAppointmentDate) {
-        setAvailableAppointmentSlots([]);
-        return;
-      }
-
-      try {
-        const slots = await fetchAvailableSlots(
-          selectedAppointmentDoctorId,
-          selectedAppointmentDate
-        );
-        setAvailableAppointmentSlots(slots);
-      } catch (loadError) {
-        setAppointmentError(
-          loadError?.name === "AbortError"
-            ? "Сервер слишком долго отвечает при загрузке свободного времени."
-            : loadError?.message || "Не удалось загрузить свободные слоты."
-        );
-        setAvailableAppointmentSlots([]);
-      }
-    }
-
-    void loadSlots();
-  }, [selectedAppointmentDate, selectedAppointmentDoctorId]);
-
-  async function handleSearchSubmit(event) {
-    event.preventDefault();
-    await loadPatients(search);
-  }
-
-  async function handleDoctorSearchSubmit(event) {
-    event.preventDefault();
-    await loadDoctors(doctorSearch);
-  }
-
-  async function handleVisitDoctorChange(event) {
-    const doctorId = event.target.value;
-    setSelectedVisitDoctorId(doctorId);
-    setSelectedVisitAppointmentId("");
-    setSelectedVisitDetails(null);
-    setVisitError("");
-
-    if (!doctorId) {
-      setDoctorAppointments([]);
-      return;
-    }
-
-    setIsListLoading(true);
-    try {
-      const data = await fetchDoctorAppointments(doctorId);
-      setDoctorAppointments(data.items);
-    } catch (loadError) {
-      setVisitError(
-        loadError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при загрузке записей врача."
-          : loadError?.message || "Не удалось загрузить записи врача."
-      );
-      setDoctorAppointments([]);
-    } finally {
-      setIsListLoading(false);
-    }
-  }
-
-  async function handleOpenVisitAppointment(appointmentId) {
-    setSelectedVisitAppointmentId(String(appointmentId));
-    setIsDetailsLoading(true);
-    setVisitError("");
-
-    try {
-      const details = await fetchVisitDetails(appointmentId);
-      setSelectedVisitDetails(details);
-    } catch (loadError) {
-      setVisitError(
-        loadError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при загрузке данных приема."
-          : loadError?.message || "Не удалось загрузить протокол приема."
-      );
-      setSelectedVisitDetails(null);
-    } finally {
-      setIsDetailsLoading(false);
-    }
-  }
-
-  function resetAppointmentForm() {
-    setSelectedAppointmentPatientId("");
-    setSelectedAppointmentDoctorId("");
-    setSelectedAppointmentDate("");
-    setSelectedAppointmentTime("");
-    setAppointmentReason("");
-    setAvailableAppointmentDates([]);
-    setAvailableAppointmentSlots([]);
-  }
-
-  async function handleLogin(credentials) {
-    setIsSaving(true);
-    setAuthError("");
-
-    try {
-      const response = await login(credentials.username, credentials.password);
-      setAuthToken(response.access_token);
-      setAuthUser(response.user);
-      navigate(getDefaultPathForUser(response.user));
-    } catch (saveError) {
-      setAuthError(
-        saveError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при входе."
-          : saveError?.message || "Не удалось выполнить вход."
-      );
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  function handleLogout() {
-    clearAuthToken();
-    setAuthUser(null);
-    setAuthError("");
-    setSuccess("");
-    resetClinicState(setters);
-    navigate("/login");
-  }
-
-  async function handleCreatePatient(form) {
-    setIsSaving(true);
-    setFormError("");
-
-    try {
-      const createdPatient = await createPatient(buildPatientPayload(form));
-      setPatients((current) => [createdPatient, ...current]);
-      navigate(`/patients/${createdPatient.id}`);
-    } catch (saveError) {
-      setFormError(
-        saveError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при сохранении пациента."
-          : saveError?.message || "Не удалось сохранить пациента. Проверь введенные данные."
-      );
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function handleUpdatePatient(form) {
-    if (!route.patientId) {
-      return;
-    }
-
-    setIsSaving(true);
-    setFormError("");
-
-    try {
-      const updatedPatient = await updatePatient(route.patientId, buildPatientPayload(form));
-      setSelectedPatient(updatedPatient);
-      setPatients((current) =>
-        current.map((patient) =>
-          patient.id === updatedPatient.id ? updatedPatient : patient
-        )
-      );
-      navigate(`/patients/${updatedPatient.id}`);
-    } catch (saveError) {
-      setFormError(
-        saveError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при обновлении пациента."
-          : saveError?.message || "Не удалось обновить данные пациента."
-      );
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function handleCreateDoctor(form) {
-    setIsSaving(true);
-    setFormError("");
-
-    try {
-      const createdDoctor = await createDoctor(form);
-      setDoctors((current) => [createdDoctor, ...current]);
-      setAvailableUserDoctors((current) =>
-        [
-          ...current,
-          {
-            id: createdDoctor.id,
-            full_name: [createdDoctor.last_name, createdDoctor.first_name, createdDoctor.middle_name]
-              .filter(Boolean)
-              .join(" "),
-            position_name: createdDoctor.position_name || null,
-          },
-        ].sort((left, right) => left.full_name.localeCompare(right.full_name))
-      );
-      navigate(`/doctors/${createdDoctor.id}`);
-    } catch (saveError) {
-      setFormError(
-        saveError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при сохранении врача."
-          : saveError?.message || "Не удалось сохранить врача. Проверь введенные данные."
-      );
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function handleAddSchedule(form) {
-    if (!route.doctorId) {
-      return;
-    }
-
-    setIsSaving(true);
-    setScheduleError("");
-
-    try {
-      const createdSchedule = await createDoctorSchedule(route.doctorId, form);
-      setSelectedDoctor((current) =>
-        current
-          ? {
-              ...current,
-              schedules: [...current.schedules, createdSchedule].sort((left, right) => {
-                const leftKey = `${left.work_date} ${left.start_time}`;
-                const rightKey = `${right.work_date} ${right.start_time}`;
-                return leftKey.localeCompare(rightKey);
-              }),
-            }
-          : current
-      );
-    } catch (saveError) {
-      setScheduleError(
-        saveError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при сохранении смены."
-          : saveError?.message || "Не удалось сохранить смену врача."
-      );
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function handleCreateAppointment(event) {
-    event.preventDefault();
-    setIsSaving(true);
-    setAppointmentError("");
-    setSuccess("");
-
-    try {
-      const createdAppointment = await createAppointment({
-        patient_id: Number(selectedAppointmentPatientId),
-        doctor_id: Number(selectedAppointmentDoctorId),
-        appointment_date: selectedAppointmentDate,
-        start_time: selectedAppointmentTime,
-        reason: appointmentReason || null,
-      });
-      setAppointments((current) => [createdAppointment, ...current]);
-      setSuccess("Пациент успешно записан на прием.");
-      resetAppointmentForm();
-    } catch (saveError) {
-      setAppointmentError(
-        saveError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при создании записи."
-          : saveError?.message || "Не удалось создать запись на прием."
-      );
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function handleCreateUser(form) {
-    setIsSaving(true);
-    setFormError("");
-    setSuccess("");
-
-    try {
-      const createdUser = await createUser(form);
-      setUsers((current) =>
-        [...current, createdUser].sort((left, right) => left.username.localeCompare(right.username))
-      );
-      if (createdUser.employee_id) {
-        setAvailableUserDoctors((current) =>
-          current.filter((doctor) => doctor.id !== createdUser.employee_id)
-        );
-      }
-      setSuccess("Пользователь успешно создан.");
-    } catch (saveError) {
-      setFormError(
-        saveError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при создании пользователя."
-          : saveError?.message || "Не удалось создать пользователя."
-      );
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function handleCompleteVisit(form) {
-    if (!selectedVisitAppointmentId) {
-      return;
-    }
-
-    setIsSaving(true);
-    setVisitError("");
-    setSuccess("");
-
-    try {
-      const details = await completeVisit(selectedVisitAppointmentId, form);
-      setSelectedVisitDetails(details);
-      setDoctorAppointments((current) =>
-        current.map((item) =>
-          Number(item.appointment_id) === Number(selectedVisitAppointmentId)
-            ? { ...item, status: details.status, has_visit: true }
-            : item
-        )
-      );
-      setSuccess("Прием успешно завершен.");
-    } catch (saveError) {
-      setVisitError(
-        saveError?.name === "AbortError"
-          ? "Сервер слишком долго отвечает при завершении приема."
-          : saveError?.message || "Не удалось завершить прием."
-      );
-    } finally {
-      setIsSaving(false);
-    }
-  }
+  const app = useClinicApp();
 
   function renderPage() {
-    if (isAuthLoading) {
+    if (app.isAuthLoading) {
       return (
         <section className="hero-card">
           <p className="placeholder">Проверка сессии...</p>
@@ -921,167 +26,167 @@ function App() {
       );
     }
 
-    if (!authUser || route.name === "login") {
-      return <LoginPage isSaving={isSaving} error={authError} onSubmit={handleLogin} />;
+    if (!app.authUser || app.route.name === "login") {
+      return <LoginPage isSaving={app.isSaving} error={app.authError} onSubmit={app.handleLogin} />;
     }
 
-    if (route.module === "visits") {
+    if (app.route.module === "visits") {
       return (
         <VisitsPage
-          doctors={doctors}
-          appointments={doctorAppointments}
-          selectedDoctorId={selectedVisitDoctorId}
-          selectedAppointmentId={selectedVisitAppointmentId}
-          visitDetails={selectedVisitDetails}
-          isDoctorLocked={getRoleName(authUser) === "doctor"}
-          isLoading={isListLoading || isDetailsLoading}
-          isSaving={isSaving}
-          error={visitError}
-          success={success}
-          onDoctorChange={handleVisitDoctorChange}
-          onOpenAppointment={handleOpenVisitAppointment}
-          onSubmit={handleCompleteVisit}
+          doctors={app.doctors}
+          appointments={app.doctorAppointments}
+          selectedDoctorId={app.selectedVisitDoctorId}
+          selectedAppointmentId={app.selectedVisitAppointmentId}
+          visitDetails={app.selectedVisitDetails}
+          isDoctorLocked={app.isDoctorLocked}
+          isLoading={app.isListLoading || app.isDetailsLoading}
+          isSaving={app.isSaving}
+          error={app.visitError}
+          success={app.success}
+          onDoctorChange={app.handleVisitDoctorChange}
+          onOpenAppointment={app.handleOpenVisitAppointment}
+          onSubmit={app.handleCompleteVisit}
         />
       );
     }
 
-    if (route.module === "appointments") {
+    if (app.route.module === "appointments") {
       return (
         <AppointmentsPage
-          patients={patients}
-          doctors={doctors}
-          appointments={appointments}
-          selectedPatientId={selectedAppointmentPatientId}
-          selectedDoctorId={selectedAppointmentDoctorId}
-          selectedDate={selectedAppointmentDate}
-          selectedTime={selectedAppointmentTime}
-          reason={appointmentReason}
-          availableDates={availableAppointmentDates}
-          availableSlots={availableAppointmentSlots}
-          isLoading={isListLoading}
-          isSaving={isSaving}
-          error={appointmentError}
-          success={success}
-          onPatientChange={(event) => setSelectedAppointmentPatientId(event.target.value)}
+          patients={app.patients}
+          doctors={app.doctors}
+          appointments={app.appointments}
+          selectedPatientId={app.selectedAppointmentPatientId}
+          selectedDoctorId={app.selectedAppointmentDoctorId}
+          selectedDate={app.selectedAppointmentDate}
+          selectedTime={app.selectedAppointmentTime}
+          reason={app.appointmentReason}
+          availableDates={app.availableAppointmentDates}
+          availableSlots={app.availableAppointmentSlots}
+          isLoading={app.isListLoading}
+          isSaving={app.isSaving}
+          error={app.appointmentError}
+          success={app.success}
+          onPatientChange={(event) => app.setSelectedAppointmentPatientId(event.target.value)}
           onDoctorChange={(event) => {
-            setSelectedAppointmentDoctorId(event.target.value);
-            setSelectedAppointmentDate("");
-            setSelectedAppointmentTime("");
-            setAvailableAppointmentDates([]);
-            setAvailableAppointmentSlots([]);
+            app.setSelectedAppointmentDoctorId(event.target.value);
+            app.setSelectedAppointmentDate("");
+            app.setSelectedAppointmentTime("");
+            app.setAvailableAppointmentDates([]);
+            app.setAvailableAppointmentSlots([]);
           }}
           onDateChange={(event) => {
-            setSelectedAppointmentDate(event.target.value);
-            setSelectedAppointmentTime("");
+            app.setSelectedAppointmentDate(event.target.value);
+            app.setSelectedAppointmentTime("");
           }}
-          onTimeChange={(event) => setSelectedAppointmentTime(event.target.value)}
-          onReasonChange={(event) => setAppointmentReason(event.target.value)}
-          onSubmit={handleCreateAppointment}
+          onTimeChange={(event) => app.setSelectedAppointmentTime(event.target.value)}
+          onReasonChange={(event) => app.setAppointmentReason(event.target.value)}
+          onSubmit={app.handleCreateAppointment}
         />
       );
     }
 
-    if (route.module === "reports") {
+    if (app.route.module === "reports") {
       return (
         <ReportsPage
-          summary={reportsSummary}
-          isLoading={isListLoading}
-          error={listError}
+          summary={app.reportsSummary}
+          isLoading={app.isListLoading}
+          error={app.listError}
         />
       );
     }
 
-    if (route.module === "users") {
+    if (app.route.module === "users") {
       return (
         <UsersPage
-          users={users}
-          roles={userRoles}
-          availableDoctors={availableUserDoctors}
-          isLoading={isListLoading}
-          isSaving={isSaving}
-          error={formError}
-          success={success}
-          onSubmit={handleCreateUser}
+          users={app.users}
+          roles={app.userRoles}
+          availableDoctors={app.availableUserDoctors}
+          isLoading={app.isListLoading}
+          isSaving={app.isSaving}
+          error={app.formError}
+          success={app.success}
+          onSubmit={app.handleCreateUser}
         />
       );
     }
 
-    if (route.module === "doctors" && route.name === "create") {
+    if (app.route.module === "doctors" && app.route.name === "create") {
       return (
         <DoctorForm
           title="Добавить врача"
           subtitle="Создай карточку сотрудника, который будет вести прием."
           initialValues={emptyDoctorForm}
           submitLabel="Добавить врача"
-          isSaving={isSaving}
-          error={formError}
-          onSubmit={handleCreateDoctor}
+          isSaving={app.isSaving}
+          error={app.formError}
+          onSubmit={app.handleCreateDoctor}
           onCancel={() => navigate("/doctors")}
         />
       );
     }
 
-    if (route.module === "doctors" && route.name === "details") {
+    if (app.route.module === "doctors" && app.route.name === "details") {
       return (
         <DoctorDetailsPage
-          doctor={selectedDoctor}
-          isLoading={isDetailsLoading}
-          isSaving={isSaving}
-          error={detailsError}
-          scheduleError={scheduleError}
-          canManageSchedule={getRoleName(authUser) === "admin"}
+          doctor={app.selectedDoctor}
+          isLoading={app.isDetailsLoading}
+          isSaving={app.isSaving}
+          error={app.detailsError}
+          scheduleError={app.scheduleError}
+          canManageSchedule={app.canManageSchedule}
           onBack={() => navigate("/doctors")}
-          onAddSchedule={handleAddSchedule}
+          onAddSchedule={app.handleAddSchedule}
         />
       );
     }
 
-    if (route.module === "doctors") {
+    if (app.route.module === "doctors") {
       return (
         <DoctorsListPage
-          doctors={doctors}
-          search={doctorSearch}
-          onSearchChange={(event) => setDoctorSearch(event.target.value)}
-          onSearchSubmit={handleDoctorSearchSubmit}
+          doctors={app.doctors}
+          search={app.doctorSearch}
+          onSearchChange={(event) => app.setDoctorSearch(event.target.value)}
+          onSearchSubmit={app.handleDoctorSearchSubmit}
           onOpenDoctor={(doctorId) => navigate(`/doctors/${doctorId}`)}
           onCreateDoctor={() => navigate("/doctors/new")}
-          canCreateDoctor={getRoleName(authUser) === "admin"}
-          isLoading={isListLoading}
-          error={doctorListError}
+          canCreateDoctor={app.canCreateDoctor}
+          isLoading={app.isListLoading}
+          error={app.doctorListError}
         />
       );
     }
 
-    if (route.name === "create") {
+    if (app.route.name === "create") {
       return (
         <PatientForm
           title="Добавить пациента"
           subtitle="Создай новую регистрационную карточку пациента."
           initialValues={emptyPatientForm}
           submitLabel="Добавить пациента"
-          isSaving={isSaving}
-          error={formError}
-          success={success}
-          onSubmit={handleCreatePatient}
+          isSaving={app.isSaving}
+          error={app.formError}
+          success={app.success}
+          onSubmit={app.handleCreatePatient}
           onCancel={() => navigate("/patients")}
         />
       );
     }
 
-    if (route.name === "details") {
+    if (app.route.name === "details") {
       return (
         <PatientDetailsPage
-          patient={selectedPatient}
-          isLoading={isDetailsLoading}
-          error={detailsError}
+          patient={app.selectedPatient}
+          isLoading={app.isDetailsLoading}
+          error={app.detailsError}
           onBack={() => navigate("/patients")}
           onEdit={(patientId) => navigate(`/patients/${patientId}/edit`)}
         />
       );
     }
 
-    if (route.name === "edit") {
-      if (isDetailsLoading && !selectedPatient) {
+    if (app.route.name === "edit") {
+      if (app.isDetailsLoading && !app.selectedPatient) {
         return (
           <section className="hero-card">
             <p className="placeholder">Загрузка формы редактирования...</p>
@@ -1093,14 +198,14 @@ function App() {
         <PatientForm
           title="Редактировать пациента"
           subtitle="Обнови контактные и регистрационные данные пациента."
-          initialValues={buildPatientForm(selectedPatient)}
+          initialValues={app.patientFormValues}
           submitLabel="Сохранить изменения"
-          isSaving={isSaving}
-          error={formError || detailsError}
-          success={success}
-          onSubmit={handleUpdatePatient}
+          isSaving={app.isSaving}
+          error={app.formError || app.detailsError}
+          success={app.success}
+          onSubmit={app.handleUpdatePatient}
           onCancel={() =>
-            navigate(selectedPatient ? `/patients/${selectedPatient.id}` : "/patients")
+            navigate(app.selectedPatient ? `/patients/${app.selectedPatient.id}` : "/patients")
           }
         />
       );
@@ -1108,31 +213,29 @@ function App() {
 
     return (
       <PatientsListPage
-        patients={patients}
-        search={search}
-        onSearchChange={(event) => setSearch(event.target.value)}
-        onSearchSubmit={handleSearchSubmit}
+        patients={app.patients}
+        search={app.search}
+        onSearchChange={(event) => app.setSearch(event.target.value)}
+        onSearchSubmit={app.handleSearchSubmit}
         onOpenPatient={(patientId) => navigate(`/patients/${patientId}`)}
         onCreatePatient={() => navigate("/patients/new")}
-        isLoading={isListLoading}
-        error={listError}
-        success={success}
+        isLoading={app.isListLoading}
+        error={app.listError}
+        success={app.success}
       />
     );
   }
 
-  const navItems = getNavigationItems(authUser);
-
   return (
     <main className="app-shell">
-      {authUser ? (
+      {app.authUser ? (
         <div className="top-nav-bar">
           <nav className="top-nav">
-            {navItems.map((item) => (
+            {app.navItems.map((item) => (
               <button
                 key={item.path}
                 type="button"
-                className={route.module === item.module ? "nav-link active" : "nav-link"}
+                className={app.route.module === item.module ? "nav-link active" : "nav-link"}
                 onClick={() => navigate(item.path)}
               >
                 {item.label}
@@ -1142,10 +245,14 @@ function App() {
 
           <div className="session-panel">
             <div className="session-copy">
-              <strong>{authUser.username}</strong>
-              <span>{ROLE_LABELS[getRoleName(authUser)] || authUser.role_name}</span>
+              <strong>{app.authUser.username}</strong>
+              <span>{ROLE_LABELS[getRoleName(app.authUser)] || app.authUser.role_name}</span>
             </div>
-            <button type="button" className="ghost-button session-button" onClick={handleLogout}>
+            <button
+              type="button"
+              className="ghost-button session-button"
+              onClick={app.handleLogout}
+            >
               Выйти
             </button>
           </div>
